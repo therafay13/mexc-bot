@@ -1,0 +1,18 @@
+[Unit]
+Description=MEXC SMC Bot
+After=network.target
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/home/ubuntu/mexc-bot
+ExecStart=/home/ubuntu/mexc-bot/.venv/bin/python run.py
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target

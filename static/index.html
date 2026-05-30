@@ -1,0 +1,520 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SMCbot + Kronos — MEXC Futures</title>
+    <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/recharts/umd/Recharts.js"></script>
+    <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=Space+Grotesk:wght@400;600;700&display=swap" rel="stylesheet">
+    <style>
+        body { font-family: 'Space Grotesk', sans-serif; background-color: #050810; color: #e2e8f0; margin: 0; overflow: hidden; }
+        .mono { font-family: 'IBM Plex Mono', monospace; }
+        ::-webkit-scrollbar { width: 6px; }
+        ::-webkit-scrollbar-track { background: #0b0f1a; }
+        ::-webkit-scrollbar-thumb { background: #1a2236; border-radius: 3px; }
+        .pulse { animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite; }
+        @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: .5; } }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect } = React;
+
+        const C = {
+            bg: "#050810", surface: "#0b0f1a", card: "#0f1420", border: "#1a2236",
+            accent: "#00e5ff", accentDim: "rgba(0, 229, 255, 0.1)",
+            green: "#00e676", greenDim: "rgba(0, 230, 118, 0.1)",
+            red: "#ff1744",   redDim: "rgba(255, 23, 68, 0.1)",
+            yellow: "#ffd600", purple: "#7b2fff",
+            text: "#e2e8f0", muted: "#4a5568", dim: "#1e2a3a",
+        };
+
+        const App = () => {
+            const [tab, setTab] = useState('Overview');
+            const [status, setStatus] = useState({ running: true, kronos_loaded: false, mode: 'PAPER' });
+            const [account, setAccount] = useState({ balance: 0, day_open: 0, daily_pnl: 0, total_pnl: 0, win_rate: 0, kronos_acc: 0, equity_curve: [] });
+            const [positions, setPositions] = useState([]);
+            const [signals, setSignals] = useState([]);
+            const [trades, setTrades] = useState([]);
+            const [scanner, setScanner] = useState([]);
+            const [events, setEvents] = useState([]);
+            const [nextScan, setNextScan] = useState(300);
+            const [settings, setSettings] = useState({
+                MEXC_API_KEY: '',
+                MEXC_SECRET_KEY: '',
+                PAPER_TRADING: true,
+                KRONOS_MODEL: 'small',
+                KRONOS_DEVICE: 'cpu',
+            });
+            const [loading, setLoading] = useState(true);
+
+            useEffect(() => {
+                const interval = setInterval(async () => {
+                    try {
+                        const res = await fetch('/api/account');
+                        const data = await res.json();
+                        setAccount(data || { balance: 0 });
+                    } catch (e) {}
+                }, 10000);
+                return () => clearInterval(interval);
+            }, []);
+
+            useEffect(() => {
+                const fetchInit = async () => {
+                    try {
+                        const [s, p, sig, t, set, sc] = await Promise.all([
+                            fetch('/api/status').then(r => r.json()),
+                            fetch('/api/positions').then(r => r.json()),
+                            fetch('/api/signals').then(r => r.json()),
+                            fetch('/api/trades').then(r => r.json()),
+                            fetch('/api/settings').then(r => r.json()),
+                            fetch('/api/scanner').then(r => r.json())
+                        ]);
+                        setStatus(s || { running: true });
+                        setPositions(p || []);
+                        setSignals(sig || []);
+                        setTrades(t || []);
+                        setSettings(set || {});
+                        setScanner(sc || []);
+                    } catch (e) {
+                        console.error("Init error:", e);
+                    } finally {
+                        setLoading(false);
+                    }
+                };
+                fetchInit();
+            }, []);
+
+            useEffect(() => {
+                const timer = setInterval(() => setNextScan(prev => prev > 0 ? prev - 1 : 300), 1000);
+                return () => clearInterval(timer);
+            }, []);
+
+            useEffect(() => {
+                const ws = new WebSocket(`ws://${window.location.host}/ws/live`);
+                ws.onmessage = (e) => {
+                    try {
+                        const msg = JSON.parse(e.data);
+                        const { event, data } = msg;
+                        if (event === 'connected') {
+                            setStatus(prev => ({ ...prev, kronos_loaded: data.kronos_loaded, mode: data.mode }));
+                        } else if (event === 'price') {
+                            setPositions(prev => prev.map(p => p.symbol === data.symbol ? { ...p, current_price: data.price } : p));
+                        } else if (event === 'signal') {
+                            setSignals(prev => [ { ...data, timestamp: msg.ts }, ...prev ].slice(0, 50));
+                            setEvents(prev => [ { ts: new Date(msg.ts * 1000).toLocaleTimeString(), type: 'signal', msg: `Signal: ${data.symbol} ${data.direction} (Score: ${data.score})`, color: C.accent }, ...prev ].slice(0, 100));
+                        } else if (event === 'trade_opened') {
+                            setEvents(prev => [ { ts: new Date(msg.ts * 1000).toLocaleTimeString(), type: 'trade', msg: `Trade Opened: ${data.symbol} ${data.direction}`, color: C.green }, ...prev ].slice(0, 100));
+                            fetch('/api/positions').then(r => r.json()).then(setPositions);
+                        } else if (event === 'scanner_update') {
+                            setScanner(data.coins || []);
+                        }
+                    } catch (err) { console.error("WS Error:", err); }
+                };
+                return () => ws.close();
+            }, []);
+
+            const toggleBot = async () => {
+                const endpoint = status.running ? '/api/bot/stop' : '/api/bot/start';
+                try {
+                    await fetch(endpoint, { method: 'POST' });
+                    setStatus(prev => ({ ...prev, running: !prev.running }));
+                } catch (e) { alert("Failed to toggle bot"); }
+            };
+
+            const saveSettings = async () => {
+                try {
+                    await fetch('/api/bot/settings', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(settings),
+                    });
+                    alert('Settings saved! Please restart the bot for changes to take effect.');
+                } catch (e) {
+                    alert('Failed to save settings.');
+                }
+            };
+
+            const SidebarItem = ({ label }) => (
+                <div 
+                    onClick={() => setTab(label)} 
+                    className={`px-5 py-3 cursor-pointer transition-all duration-200 font-semibold text-sm ${tab === label ? 'text-cyan-400 bg-cyan-400/10 border-l-4 border-cyan-400' : 'text-slate-500 border-l-4 border-transparent hover:text-slate-300'}`}
+                >
+                    {label}
+                </div>
+            );
+
+            if (loading) return (
+                <div className="h-screen w-screen flex items-center justify-center bg-[#050810] text-cyan-400 font-bold text-xl animate-pulse">
+                    INITIALIZING SMC BOT...
+                </div>
+            );
+
+            // Safety check for Recharts
+            const Charts = window.Recharts || {};
+            const { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, ReferenceLine } = Charts;
+
+            return (
+                <div className="flex h-screen overflow-hidden">
+                    <div className="w-60 bg-[#0b0f1a] border-r border-[#1a2236] flex flex-col">
+                        <div className="p-5 text-xl font-bold text-slate-100 flex items-center gap-3">
+                            <div className="w-6 h-6 bg-gradient-to-br from-cyan-400 to-purple-600 rounded"></div>
+                            SMCbot
+                        </div>
+                        <div className="flex-1 mt-5">
+                            {['Overview', 'Positions', 'Signals', 'History', 'Scanner', 'Settings'].map(item => <SidebarItem key={item} label={item} />)}
+                        </div>
+                        <div className="p-5 border-t border-[#1a2236] bg-[#0f1420]">
+                            <div className="mono text-2xl font-semibold mb-2">${account.balance?.toFixed(2) || '0.00'}</div>
+                            <div className={`mono text-sm ${account.daily_pnl >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                                {account.daily_pnl >= 0 ? '+' : ''}{account.daily_pnl?.toFixed(2) || '0.00'} USDT
+                            </div>
+                            <div className={`mt-3 inline-block px-2 py-1 rounded text-[10px] font-bold text-black ${status.mode === 'PAPER' ? 'bg-yellow-400' : 'bg-green-400'}`}>
+                                {status.mode}
+                            </div>
+                        </div>
+                    </div>
+
+                    <div className="flex-1 flex flex-col overflow-hidden">
+                        <div className="h-14 bg-[#0b0f1a] border-b border-[#1a2236] flex items-center justify-between px-5 text-xs text-slate-500">
+                            <div className="flex items-center gap-4">
+                                <div className="flex items-center gap-2">
+                                    <div className={`w-2 h-2 rounded-full ${status.running ? 'bg-green-400 shadow-[0_0_8px_#00e676]' : 'bg-red-400'} ${status.running ? 'pulse' : ''}`}></div>
+                                    <span className="text-slate-100 font-semibold">{status.running ? 'LIVE' : 'STOPPED'}</span>
+                                </div>
+                                <div className="w-px h-3 bg-[#1a2236]"></div>
+                                <span>MEXC Futures</span>
+                                <div className="w-px h-3 bg-[#1a2236]"></div>
+                                <span className={`px-2 py-0.5 rounded font-bold text-white ${status.kronos_loaded ? 'bg-purple-600' : 'bg-slate-700'}`}>
+                                    🧠 KRONOS {status.kronos_loaded ? 'ACTIVE' : 'OFFLINE'}
+                                </span>
+                            </div>
+                            <button 
+                                onClick={toggleBot}
+                                className={`px-3 py-1 rounded border font-semibold transition-all ${status.running ? 'bg-red-400/10 text-red-400 border-red-400 hover:bg-red-400/20' : 'bg-green-400/10 text-green-400 border-green-400 hover:bg-green-400/20'}`}
+                            >
+                                {status.running ? 'STOP BOT' : 'START BOT'}
+                            </button>
+                        </div>
+
+                        <div className="flex-1 p-6 overflow-y-auto">
+                            {tab === 'Overview' && (
+                                <div className="flex flex-col gap-6">
+                                    <div className="grid grid-cols-4 gap-5">
+                                        {[
+                                            { label: 'Total PnL', val: `$${account.total_pnl?.toFixed(2) || '0.00'}`, color: account.total_pnl >= 0 ? 'text-green-400' : 'text-red-400' },
+                                            { label: 'Day PnL', val: `$${account.daily_pnl?.toFixed(2) || '0.00'}`, color: account.daily_pnl >= 0 ? 'text-green-400' : 'text-red-400' },
+                                            { label: 'Win Rate', val: `${account.win_rate || 0}%`, color: 'text-cyan-400' },
+                                            { label: 'Positions', val: `${positions.length}/3`, color: 'text-slate-100' },
+                                        ].map((card, i) => (
+                                            <div key={i} className="bg-[#0f1420] p-5 rounded-lg border border-[#1a2236]">
+                                                <div className="text-slate-500 text-xs mb-2">{card.label}</div>
+                                                <div className={`mono text-2xl font-bold ${card.color}`}>{card.val}</div>
+                                            </div>
+                                        ))}
+                                    </div>
+                                    <div className="bg-[#0f1420] p-5 rounded-lg border border-[#1a2236] h-80">
+                                        <div className="mb-5 font-semibold">Equity Curve</div>
+                                        {LineChart ? (
+                                            <ResponsiveContainer width="100%" height="90%">
+                                                <LineChart data={account.equity_curve || []}>
+                                                    <CartesianGrid strokeDasharray="3 3" stroke="#1a2236" vertical={false} />
+                                                    <XAxis dataKey="day" stroke="#4a5568" fontSize={10} tickLine={false} axisLine={false} />
+                                                    <YAxis stroke="#4a5568" fontSize={10} tickLine={false} axisLine={false} domain={['auto', 'auto']} />
+                                                    <Tooltip contentStyle={{ backgroundColor: '#0b0f1a', border: '1px solid #1a2236', color: '#e2e8f0' }} />
+                                                    <ReferenceLine y={300} stroke="#4a5568" strokeDasharray="3 3" />
+                                                    <Line type="monotone" dataKey="equity" stroke="#00e5ff" strokeWidth={2} dot={false} />
+                                                </LineChart>
+                                            </ResponsiveContainer>
+                                        ) : (
+                                            <div className="h-full flex items-center justify-center text-slate-600">Loading Charts...</div>
+                                        )}
+                                    </div>
+                                    <div className="grid grid-cols-2 gap-5">
+                                        <div className="bg-[#0f1420] p-5 rounded-lg border border-[#1a2236]">
+                                            <div className="mb-4 font-semibold">Event Feed</div>
+                                            <div className="flex flex-col gap-2 max-h-64 overflow-y-auto">
+                                                {events.map((e, i) => (
+                                                    <div key={i} className="text-xs flex gap-3 py-1 border-b border-[#1e2a3a]">
+                                                        <span className="mono text-slate-500">{e.ts}</span>
+                                                        <span style={{ color: e.color }}>{e.msg}</span>
+                                                    </div>
+                                                ))}
+                                                {events.length === 0 && <div className="text-slate-600 text-xs">No events yet...</div>}
+                                            </div>
+                                        </div>
+                                        <div className="bg-[#0f1420] p-5 rounded-lg border border-[#1a2236]">
+                                            <div className="mb-4 font-semibold">Kronos Status</div>
+                                            <div className="flex flex-col gap-3 text-sm">
+                                                <div className="flex justify-between">
+                                                    <span className="text-slate-500">Model Loaded</span>
+                                                    <span className={status.kronos_loaded ? 'text-green-400' : 'text-red-400'}>{status.kronos_loaded ? 'YES' : 'NO'}</span>
+                                                </div>
+                                                <div className="flex justify-between">
+                                                    <span className="text-slate-500">Device</span>
+                                                    <span className="mono">{status.device || 'cpu'}</span>
+                                                </div>
+                                                <div className="flex justify-between">
+                                                    <span className="text-slate-500">Accuracy</span>
+                                                    <span className="mono text-purple-500">{account.kronos_acc || 0}%</span>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                            )}
+
+                            {tab === 'Positions' && (
+                                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
+                                    {positions.map((p, i) => (
+                                        <div key={i} className="bg-[#0f1420] p-5 rounded-lg border border-[#1a2236] relative">
+                                            <div className="flex justify-between items-center mb-5">
+                                                <div className="flex items-center gap-3">
+                                                    <span className="text-lg font-bold">{p.symbol}</span>
+                                                    <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${p.direction === 'LONG' ? 'bg-green-400/10 text-green-400' : 'bg-red-400/10 text-red-400'}`}>{p.direction}</span>
+                                                    <span className="px-2 py-0.5 rounded text-[10px] bg-slate-800 text-slate-300">{p.leverage}x</span>
+                                                    {p.tp1_hit && <span className="px-2 py-0.5 rounded text-[10px] bg-cyan-400/10 text-cyan-400 font-bold">BE ✓</span>}
+                                                </div>
+                                            </div>
+                                            <div className={`mono text-3xl font-bold text-center my-5 ${p.unrealized_pnl >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                                                {p.unrealized_pnl >= 0 ? '+' : ''}{p.unrealized_pnl?.toFixed(2) || '0.00'}
+                                            </div>
+                                            <div className="grid grid-cols-4 gap-2 text-[11px] text-center mb-5">
+                                                <div><div className="text-slate-500 mb-1">Entry</div><div className="mono">{p.entry_price}</div></div>
+                                                <div><div className="text-slate-500 mb-1">Current</div><div className="mono">{p.current_price}</div></div>
+                                                <div><div className="text-slate-500 mb-1">SL</div><div className="mono">{p.sl_price}</div></div>
+                                                <div><div className="text-slate-500 mb-1">TP1</div><div className="mono">{p.tp1}</div></div>
+                                            </div>
+                                            <div className="h-1.5 bg-slate-800 rounded-full overflow-hidden mb-5 relative">
+                                                <div className="absolute left-1/2 w-0.5 h-full bg-slate-100 z-10"></div>
+                                                <div className="absolute inset-0 bg-gradient-to-r from-red-500 via-yellow-400 to-green-500 opacity-60"></div>
+                                            </div>
+                                            <div className="flex justify-between text-xs">
+                                                <div className="flex items-center gap-2">
+                                                    <span className="text-slate-500">Score:</span>
+                                                    <div className="w-12 h-1 bg-slate-800 rounded-full overflow-hidden">
+                                                        <div className="h-full bg-cyan-400" style={{ width: `${p.score}%` }}></div>
+                                                    </div>
+                                                </div>
+                                                <div className="flex items-center gap-2">
+                                                    <span className="text-slate-500">Kronos:</span>
+                                                    <div className="w-12 h-1 bg-slate-800 rounded-full overflow-hidden">
+                                                        <div className="h-full bg-purple-500" style={{ width: `${(p.kronos_confidence || 0) * 100}%` }}></div>
+                                                    </div>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    ))}
+                                    {[...Array(Math.max(0, 3 - positions.length))].map((_, i) => (
+                                        <div key={i} className="bg-[#0b0f1a] p-10 rounded-lg border border-dashed border-[#1a2236] text-center text-slate-600 text-sm">
+                                            Empty Slot
+                                        </div>
+                                    ))}
+                                </div>
+                            )}
+
+                            {tab === 'Signals' && (
+                                <div className="bg-[#0f1420] rounded-lg border border-[#1a2236] overflow-hidden">
+                                    <table className="w-full text-left text-sm">
+                                        <thead>
+                                            <tr className="bg-[#0b0f1a] text-slate-500 font-semibold">
+                                                <th className="p-3">Symbol</th>
+                                                <th className="p-3">Dir</th>
+                                                <th className="p-3">Score</th>
+                                                <th className="p-3">Kronos</th>
+                                                <th className="p-3">Status</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+                                            {signals.map((s, i) => (
+                                                <tr key={i} className="border-b border-[#1a2236]">
+                                                    <td className="p-3 font-semibold">{s.symbol}</td>
+                                                    <td className={`p-3 ${s.direction === 'LONG' ? 'text-green-400' : 'text-red-400'}`}>{s.direction}</td>
+                                                    <td className="p-3">
+                                                        <div className="flex items-center gap-2">
+                                                            <span className="mono">{s.score}</span>
+                                                            <div className="w-10 h-1 bg-slate-800 rounded-full overflow-hidden">
+                                                                <div className="h-full bg-cyan-400" style={{ width: `${s.score}%` }}></div>
+                                                            </div>
+                                                        </div>
+                                                    </td>
+                                                    <td className="p-3">
+                                                        <div className="flex flex-col gap-1">
+                                                            <span className="mono text-[11px]">{s.kronos_move_pct}%</span>
+                                                            <div className="w-12 h-1 bg-slate-800 rounded-full overflow-hidden">
+                                                                <div className="h-full bg-purple-500" style={{ width: `${(s.kronos_confidence || 0) * 100}%` }}></div>
+                                                            </div>
+                                                            {s.kronos_vetoed && <span className="text-red-500 text-[9px] font-bold">VETOED</span>}
+                                                        </div>
+                                                    </td>
+                                                    <td className="p-3">
+                                                        {s.approved ? 
+                                                            <span className="text-green-400 text-[11px] font-bold">✓ APPROVED</span> : 
+                                                            <span className="text-red-400 text-[11px]">✗ {s.reason}</span>
+                                                        }
+                                                    </td>
+                                                </tr>
+                                            ))}
+                                        </tbody>
+                                    </table>
+                                </div>
+                            )}
+
+                            {tab === 'History' && (
+                                <div className="flex flex-col gap-6">
+                                    <div className="grid grid-cols-4 gap-5">
+                                        {[
+                                            { label: 'Total Closed', val: trades.length, color: 'text-slate-100' },
+                                            { label: 'Winners', val: trades.filter(t => t.winner).length, color: 'text-green-400' },
+                                            { label: 'Losers', val: trades.filter(t => !t.winner).length, color: 'text-red-400' },
+                                            { label: 'Net PnL', val: `$${trades.reduce((acc, t) => acc + (t.pnl || 0), 0).toFixed(2)}`, color: 'text-slate-100' },
+                                        ].map((card, i) => (
+                                            <div key={i} className="bg-[#0f1420] p-5 rounded-lg border border-[#1a2236]">
+                                                <div className="text-slate-500 text-xs mb-2">{card.label}</div>
+                                                <div className={`mono text-2xl font-bold ${card.color}`}>{card.val}</div>
+                                            </div>
+                                        ))}
+                                    </div>
+                                    <div className="bg-[#0f1420] rounded-lg border border-[#1a2236] overflow-hidden">
+                                        <table className="w-full text-left text-sm">
+                                            <thead>
+                                                <tr className="bg-[#0b0f1a] text-slate-500 font-semibold">
+                                                    <th className="p-3">Symbol</th>
+                                                    <th className="p-3">Dir</th>
+                                                    <th className="p-3">Entry</th>
+                                                    <th className="p-3">Exit</th>
+                                                    <th className="p-3">PnL</th>
+                                                    <th className="p-3">R:R</th>
+                                                    <th className="p-3">Score</th>
+                                                    <th className="p-3">Kronos</th>
+                                                    <th className="p-3">When</th>
+                                                </tr>
+                                            </thead>
+                                            <tbody>
+                                                {trades.map((t, i) => (
+                                                    <tr key={i} className="border-b border-[#1a2236]">
+                                                        <td className="p-3 font-semibold">{t.symbol}</td>
+                                                        <td className={`p-3 ${t.direction === 'LONG' ? 'text-green-400' : 'text-red-400'}`}>{t.direction}</td>
+                                                        <td className="p-3 mono">{t.entry}</td>
+                                                        <td className="p-3 mono">{t.exit}</td>
+                                                        <td className={`p-3 mono ${t.pnl >= 0 ? 'text-green-400' : 'text-red-400'}`}>{t.pnl?.toFixed(2) || '0.00'}</td>
+                                                        <td className="p-3 mono">{t.rr?.toFixed(2) || '0.00'}</td>
+                                                        <td className="p-3 mono">{t.score}</td>
+                                                        <td className="p-3 mono">{t.kronos_confidence?.toFixed(2) || '0.00'}</td>
+                                                        <td className="p-3 text-slate-500 text-[11px]">{new Date(t.entry_time * 1000).toLocaleDateString()}</td>
+                                                    </tr>
+                                                ))}
+                                            </tbody>
+                                        </table>
+                                    </div>
+                                </div>
+                            )}
+
+                            {tab === 'Scanner' && (
+                                <div className="flex flex-col gap-5">
+                                    <div className="flex items-center gap-3 text-sm text-slate-500">
+                                        <span>Next scan in</span>
+                                        <span className="mono text-cyan-400 font-semibold">{nextScan}s</span>
+                                    </div>
+                                    <div className="bg-[#0f1420] rounded-lg border border-[#1a2236] overflow-hidden">
+                                        <table className="w-full text-left text-sm">
+                                            <thead>
+                                                <tr className="bg-[#0b0f1a] text-slate-500 font-semibold">
+                                                    <th className="p-3">Symbol</th>
+                                                    <th className="p-3">Opportunity Score</th>
+                                                    <th className="p-3">Status</th>
+                                                </tr>
+                                            </thead>
+                                            <tbody>
+                                                {scanner.map((coin, i) => (
+                                                    <tr key={i} className="border-b border-[#1a2236]">
+                                                        <td className="p-3 font-semibold">{coin.symbol}</td>
+                                                        <td className="p-3">
+                                                            <div className="flex items-center gap-2">
+                                                                <span className="mono">{coin.score?.toFixed(1) || '0.0'}</span>
+                                                                <div className="w-24 h-1 bg-slate-800 rounded-full overflow-hidden">
+                                                                    <div className="h-full bg-cyan-400" style={{ width: `${Math.min(100, coin.score || 0)}%` }}></div>
+                                                                </div>
+                                                            </div>
+                                                        </td>
+                                                        <td className="p-3">
+                                                            <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${coin.score > 50 ? 'bg-cyan-400/10 text-cyan-400' : 'bg-slate-800 text-slate-500'}`}>
+                                                                {coin.score > 70 ? 'ANALYZING' : coin.score > 40 ? 'WATCH' : 'LOW'}
+                                                            </span>
+                                                        </td>
+                                                    </tr>
+                                                ))}
+                                            </tbody>
+                                        </table>
+                                    </div>
+                                </div>
+                            )}
+
+                            {tab === 'Settings' && (
+                                <div className="max-w-xl mx-auto bg-[#0f1420] p-8 rounded-xl border border-[#1a2236]">
+                                    <div className="text-xl font-bold mb-6 text-cyan-400">Bot Configuration</div>
+                                    <div className="flex flex-col gap-5">
+                                        <div>
+                                            <label className="block text-slate-500 text-xs mb-2">MEXC API Key</label>
+                                            <input 
+                                                className="w-full p-2 bg-[#0b0f1a] border border-[#1a2236] rounded text-slate-100 mono text-sm focus:border-cyan-400 outline-none"
+                                                value={settings.MEXC_API_KEY || ''} 
+                                                onChange={e => setSettings({...settings, MEXC_API_KEY: e.target.value})}
+                                            />
+                                        </div>
+                                        <div>
+                                            <label className="block text-slate-500 text-xs mb-2">MEXC Secret Key</label>
+                                            <input 
+                                                type="password"
+                                                className="w-full p-2 bg-[#0b0f1a] border border-[#1a2236] rounded text-slate-100 mono text-sm focus:border-cyan-400 outline-none"
+                                                value={settings.MEXC_SECRET_KEY || ''} 
+                                                onChange={e => setSettings({...settings, MEXC_SECRET_KEY: e.target.value})}
+                                            />
+                                        </div>
+                                        <div className="flex items-center justify-between py-2">
+                                            <label className="text-slate-100 font-semibold text-sm">Paper Trading Mode</label>
+                                            <input 
+                                                type="checkbox" 
+                                                checked={settings.PAPER_TRADING || false} 
+                                                onChange={e => setSettings({...settings, PAPER_TRADING: e.target.checked})}
+                                                className="w-5 h-5 accent-cyan-400"
+                                            />
+                                        </div>
+                                        <div>
+                                            <label className="block text-slate-500 text-xs mb-2">Kronos Model Size</label>
+                                            <select 
+                                                className="w-full p-2 bg-[#0b0f1a] border border-[#1a2236] rounded text-slate-100 text-sm focus:border-cyan-400 outline-none"
+                                                value={settings.KRONOS_MODEL || 'small'}
+                                                onChange={e => setSettings({...settings, KRONOS_MODEL: e.target.value})}
+                                            >
+                                                <option value="mini">Mini (Fastest)</option>
+                                                <option value="small">Small (Balanced)</option>
+                                                <option value="base">Base (Most Accurate)</option>
+                                            </select>
+                                        </div>
+                                        <button 
+                                            onClick={saveSettings}
+                                            className="py-3 bg-cyan-400 text-black font-bold rounded hover:bg-cyan-300 transition-all mt-4"
+                                        >
+                                            Save Configuration
+                                        </button>
+                                    </div>
+                                </div>
+                            )}
+                        </div>
+                    </div>
+                </div>
+            );
+        };
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
