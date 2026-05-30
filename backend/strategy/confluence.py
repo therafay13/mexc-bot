@@ -118,4 +118,4 @@ def score_setup(symbol: str, candles_15m: List[Candle], candles_1h: List[Candle]
 
 def _reject(reason: str) -> dict:
     return {"approved": False, "reject_reason": reason, "score": 0,
-            "score_breakdown": {}, "direction": None, "entry_zone": None, "sl_price": None}
+            "score_breakdown": {}, "entry_zone": None, "sl_price": None}

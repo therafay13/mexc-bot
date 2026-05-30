@@ -104,6 +104,34 @@ def parse_candles(raw):
     return sorted(out, key=lambda c: c.timestamp)
 
 
+def _summarize_analysis(result: dict) -> dict:
+    """Extract key analysis fields from score_setup result for storage."""
+    summary = {
+        "direction": result.get("direction"),
+        "score": result.get("score", 0),
+        "score_breakdown": result.get("score_breakdown", {}),
+        "reject_reason": result.get("reject_reason", ""),
+        "entry_zone": result.get("entry_zone"),
+        "sl_price": result.get("sl_price"),
+        "current_price": result.get("current_price"),
+        "atr": result.get("atr"),
+        "atr_pct": result.get("atr_pct"),
+    }
+    ob = result.get("active_ob")
+    if ob:
+        summary["order_block"] = {
+            "high": ob.ob_high, "low": ob.ob_low,
+            "direction": ob.direction
+        }
+    fvgs = result.get("fvgs", [])
+    if fvgs:
+        summary["fair_value_gaps"] = [
+            {"high": f.fvg_high, "low": f.fvg_low, "direction": f.direction}
+            for f in fvgs[:5]
+        ]
+    return summary
+
+
 async def _analyze_and_trade(symbol: str, norm: str):
     """
     Full 6-layer pipeline for a single coin.
@@ -126,16 +154,15 @@ async def _analyze_and_trade(symbol: str, norm: str):
         trade_log.log_signal(
             symbol=norm, direction="N/A", score=0, breakdown={},
             approved=False, reason=f"Insufficient data ({len(c15m)} candles)",
-            kronos_vetoed=False, kronos_move_pct=0.0
+            kronos_vetoed=False, kronos_move_pct=0.0, detail={}
         )
         return
 
     current_price = c15m[-1].close
 
-
-
     # Layers 2–5: SMC + Confluence
     result = score_setup(norm, c15m, c1h)
+    result_summary = _summarize_analysis(result)
 
     # Log signal regardless of outcome
     kronos_vetoed   = False
@@ -158,7 +185,8 @@ async def _analyze_and_trade(symbol: str, norm: str):
         symbol=norm, direction=result.get("direction","N/A"),
         score=result.get("score", 0), breakdown=result.get("score_breakdown", {}),
         approved=result.get("approved", False), reason=result.get("reject_reason",""),
-        kronos_vetoed=kronos_vetoed, kronos_move_pct=kronos_move_pct
+        kronos_vetoed=kronos_vetoed, kronos_move_pct=kronos_move_pct,
+        detail=result_summary
     )
     await broadcast("signal", {
         "symbol":    norm,
@@ -359,8 +387,9 @@ async def get_signals(limit: int = 30):
              "approved": s.approved, "reason": s.reject_reason,
              "kronos_vetoed": s.kronos_vetoed,
              "kronos_move_pct": s.kronos_move_pct,
+             "detail": json.loads(s.detail) if s.detail else {},
              "timestamp": s.timestamp}
-             for s in sigs]
+            for s in sigs]
 
 
 @app.post("/api/bot/stop")

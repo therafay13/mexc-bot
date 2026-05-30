@@ -44,6 +44,7 @@ class Signal(Base):
     reject_reason    = Column(String)
     kronos_vetoed    = Column(Boolean, default=False)
     kronos_move_pct  = Column(Float, default=0)
+    detail           = Column(Text, default="{}")
     timestamp        = Column(Integer)
 
 
@@ -89,12 +90,14 @@ class TradeLog:
                 s.commit()
 
     def log_signal(self, symbol, direction, score, breakdown, approved,
-                    reason="", kronos_vetoed=False, kronos_move_pct=0.0):
+                    reason="", kronos_vetoed=False, kronos_move_pct=0.0,
+                    detail=None):
         with Session(engine) as s:
             s.add(Signal(symbol=symbol, direction=direction, score=score,
                          score_breakdown=json.dumps(breakdown), approved=approved,
                          reject_reason=reason, kronos_vetoed=kronos_vetoed,
                          kronos_move_pct=kronos_move_pct,
+                         detail=json.dumps(detail or {}),
                          timestamp=int(time.time())))
             s.commit()
             # Keep only the 30 most recent signals

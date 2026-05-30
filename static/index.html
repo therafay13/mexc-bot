@@ -53,6 +53,7 @@
                 KRONOS_DEVICE: 'cpu',
             });
             const [loading, setLoading] = useState(true);
+            const [expandedSignal, setExpandedSignal] = useState(null);
 
             useEffect(() => {
                 const interval = setInterval(async () => {
@@ -329,37 +330,87 @@
                                                 <th className="p-3">Score</th>
                                                 <th className="p-3">Kronos</th>
                                                 <th className="p-3">Status</th>
+                                                <th className="p-3 w-10"></th>
                                             </tr>
                                         </thead>
                                         <tbody>
                                             {signals.map((s, i) => (
-                                                <tr key={i} className="border-b border-[#1a2236]">
-                                                    <td className="p-3 font-semibold">{s.symbol}</td>
-                                                    <td className={`p-3 ${s.direction === 'LONG' ? 'text-green-400' : 'text-red-400'}`}>{s.direction}</td>
-                                                    <td className="p-3">
-                                                        <div className="flex items-center gap-2">
-                                                            <span className="mono">{s.score}</span>
-                                                            <div className="w-10 h-1 bg-slate-800 rounded-full overflow-hidden">
-                                                                <div className="h-full bg-cyan-400" style={{ width: `${s.score}%` }}></div>
+                                                <React.Fragment key={i}>
+                                                    <tr className={`border-b border-[#1a2236] cursor-pointer hover:bg-[#1a2236] transition-colors ${expandedSignal === i ? 'bg-[#1a2236]' : ''}`} onClick={() => setExpandedSignal(expandedSignal === i ? null : i)}>
+                                                        <td className="p-3 font-semibold">{s.symbol}</td>
+                                                        <td className={`p-3 ${s.direction === 'LONG' ? 'text-green-400' : s.direction === 'SHORT' ? 'text-red-400' : 'text-slate-500'}`}>{s.direction || '—'}</td>
+                                                        <td className="p-3">
+                                                            <div className="flex items-center gap-2">
+                                                                <span className="mono">{s.score}</span>
+                                                                <div className="w-10 h-1 bg-slate-800 rounded-full overflow-hidden">
+                                                                    <div className="h-full bg-cyan-400" style={{ width: `${s.score}%` }}></div>
+                                                                </div>
                                                             </div>
-                                                        </div>
-                                                    </td>
-                                                    <td className="p-3">
-                                                        <div className="flex flex-col gap-1">
-                                                            <span className="mono text-[11px]">{s.kronos_move_pct}%</span>
-                                                            <div className="w-12 h-1 bg-slate-800 rounded-full overflow-hidden">
-                                                                <div className="h-full bg-purple-500" style={{ width: `${(s.kronos_confidence || 0) * 100}%` }}></div>
+                                                        </td>
+                                                        <td className="p-3">
+                                                            <div className="flex flex-col gap-1">
+                                                                <span className="mono text-[11px]">{s.kronos_move_pct}%</span>
+                                                                <div className="w-12 h-1 bg-slate-800 rounded-full overflow-hidden">
+                                                                    <div className="h-full bg-purple-500" style={{ width: `${(s.kronos_confidence || 0) * 100}%` }}></div>
+                                                                </div>
+                                                                {s.kronos_vetoed && <span className="text-red-500 text-[9px] font-bold">VETOED</span>}
                                                             </div>
-                                                            {s.kronos_vetoed && <span className="text-red-500 text-[9px] font-bold">VETOED</span>}
-                                                        </div>
-                                                    </td>
-                                                    <td className="p-3">
-                                                        {s.approved ? 
-                                                            <span className="text-green-400 text-[11px] font-bold">✓ APPROVED</span> : 
-                                                            <span className="text-red-400 text-[11px]">✗ {s.reason}</span>
-                                                        }
-                                                    </td>
-                                                </tr>
+                                                        </td>
+                                                        <td className="p-3">
+                                                            {s.approved ? 
+                                                                <span className="text-green-400 text-[11px] font-bold">✓ APPROVED</span> : 
+                                                                <span className="text-red-400 text-[11px]">✗ {s.reason}</span>
+                                                            }
+                                                        </td>
+                                                        <td className="p-3 text-slate-500">{expandedSignal === i ? '▲' : '▼'}</td>
+                                                    </tr>
+                                                    {expandedSignal === i && s.detail && (
+                                                        <tr className="bg-[#0b0f1a]">
+                                                            <td colSpan="6" className="p-4">
+                                                                <div className="grid grid-cols-2 md:grid-cols-3 gap-4 text-xs">
+                                                                    {s.detail.order_block && (
+                                                                        <div className="bg-[#0f1420] p-3 rounded border border-[#1a2236]">
+                                                                            <div className="text-cyan-400 font-bold mb-2">Order Block</div>
+                                                                            <div>High: <span className="mono">{s.detail.order_block.high}</span></div>
+                                                                            <div>Low: <span className="mono">{s.detail.order_block.low}</span></div>
+                                                                            <div>Dir: {s.detail.order_block.direction}</div>
+                                                                        </div>
+                                                                    )}
+                                                                    {s.detail.fair_value_gaps && s.detail.fair_value_gaps.length > 0 && (
+                                                                        <div className="bg-[#0f1420] p-3 rounded border border-[#1a2236]">
+                                                                            <div className="text-purple-400 font-bold mb-2">FVG Zones</div>
+                                                                            {s.detail.fair_value_gaps.map((f, fi) => (
+                                                                                <div key={fi} className="mb-1">
+                                                                                    {f.direction}: {f.low}–{f.high}
+                                                                                </div>
+                                                                            ))}
+                                                                        </div>
+                                                                    )}
+                                                                    {s.detail.score_breakdown && Object.keys(s.detail.score_breakdown).length > 0 && (
+                                                                        <div className="bg-[#0f1420] p-3 rounded border border-[#1a2236]">
+                                                                            <div className="text-green-400 font-bold mb-2">Score Breakdown ({s.detail.score})</div>
+                                                                            {Object.entries(s.detail.score_breakdown).map(([k, v]) => (
+                                                                                <div key={k} className="flex justify-between py-0.5">
+                                                                                    <span className="text-slate-400">{k}</span>
+                                                                                    <span className="mono">{v}</span>
+                                                                                </div>
+                                                                            ))}
+                                                                        </div>
+                                                                    )}
+                                                                    {s.detail.entry_zone && (
+                                                                        <div className="bg-[#0f1420] p-3 rounded border border-[#1a2236]">
+                                                                            <div className="text-yellow-400 font-bold mb-2">Entry Zone</div>
+                                                                            <div>{s.detail.entry_zone[0]} – {s.detail.entry_zone[1]}</div>
+                                                                            {s.detail.sl_price && <div>SL: <span className="mono text-red-400">{s.detail.sl_price}</span></div>}
+                                                                            {s.detail.current_price && <div>Current: <span className="mono">{s.detail.current_price}</span></div>}
+                                                                            {s.detail.atr_pct && <div>ATR%: {s.detail.atr_pct}</div>}
+                                                                        </div>
+                                                                    )}
+                                                                </div>
+                                                            </td>
+                                                        </tr>
+                                                    )}
+                                                </React.Fragment>
                                             ))}
                                         </tbody>
                                     </table>
