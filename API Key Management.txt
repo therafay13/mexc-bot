@@ -1,7 +1,0 @@
-About the 90-day API key expiry: Yes, you'll need to update it manually every 90 days. When the time comes:
-
-Go to MEXC → API Management → create a new key
-SSH into the VM: nano /home/ubuntu/mexc-bot/.env
-Replace the old key/secret with the new ones
-Run: sudo systemctl restart mexc-bot
-Done — takes 2 minutes total
