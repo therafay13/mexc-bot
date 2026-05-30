@@ -406,6 +406,28 @@
                                                                             {s.detail.atr_pct && <div>ATR%: {s.detail.atr_pct}</div>}
                                                                         </div>
                                                                     )}
+                                                                    {s.detail.trend_15m && (
+                                                                        <div className="bg-[#0f1420] p-3 rounded border border-[#1a2236]">
+                                                                            <div className="text-slate-300 font-bold mb-2">Market Structure</div>
+                                                                            <div className="flex justify-between py-0.5"><span className="text-slate-400">15m Trend</span><span className="mono">{s.detail.trend_15m}</span></div>
+                                                                            <div className="flex justify-between py-0.5"><span className="text-slate-400">15m MSS</span><span className="mono">{s.detail.mss_direction_15m || '—'}</span></div>
+                                                                            <div className="flex justify-between py-0.5"><span className="text-slate-400">1h Trend</span><span className="mono">{s.detail.trend_1h}</span></div>
+                                                                            <div className="flex justify-between py-0.5"><span className="text-slate-400">1h MSS</span><span className="mono">{s.detail.mss_direction_1h || '—'}</span></div>
+                                                                        </div>
+                                                                    )}
+                                                                    {!s.detail.order_block && !s.detail.fair_value_gaps?.length && Object.keys(s.detail.score_breakdown || {}).length === 0 && (
+                                                                        <div className="bg-[#0f1420] p-3 rounded border border-[#1a2236] col-span-2 md:col-span-3">
+                                                                            <div className="text-slate-400 font-bold mb-2">Signal Details</div>
+                                                                            <div className="grid grid-cols-2 gap-2">
+                                                                                <div className="flex justify-between py-0.5"><span className="text-slate-500">Status</span><span className={s.approved ? 'text-green-400' : 'text-red-400'}>{s.approved ? 'APPROVED' : 'REJECTED'}</span></div>
+                                                                                <div className="flex justify-between py-0.5"><span className="text-slate-500">Reason</span><span>{s.reason}</span></div>
+                                                                                <div className="flex justify-between py-0.5"><span className="text-slate-500">Score</span><span className="mono">{s.score}</span></div>
+                                                                                <div className="flex justify-between py-0.5"><span className="text-slate-500">Direction</span><span>{s.direction || '—'}</span></div>
+                                                                                {s.detail.current_price && <div className="flex justify-between py-0.5"><span className="text-slate-500">Price</span><span className="mono">{s.detail.current_price}</span></div>}
+                                                                                {s.detail.atr_pct && <div className="flex justify-between py-0.5"><span className="text-slate-500">ATR%</span><span className="mono">{s.detail.atr_pct}</span></div>}
+                                                                            </div>
+                                                                        </div>
+                                                                    )}
                                                                 </div>
                                                             </td>
                                                         </tr>

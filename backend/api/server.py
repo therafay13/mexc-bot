@@ -116,6 +116,10 @@ def _summarize_analysis(result: dict) -> dict:
         "current_price": result.get("current_price"),
         "atr": result.get("atr"),
         "atr_pct": result.get("atr_pct"),
+        "trend_15m": result.get("trend_15m"),
+        "trend_1h": result.get("trend_1h"),
+        "mss_direction_15m": result.get("mss_direction_15m"),
+        "mss_direction_1h": result.get("mss_direction_1h"),
     }
     ob = result.get("active_ob")
     if ob:
@@ -162,6 +166,10 @@ async def _analyze_and_trade(symbol: str, norm: str):
 
     # Layers 2–5: SMC + Confluence
     result = score_setup(norm, c15m, c1h)
+    logger.info(f"{norm} analysis: 15m_trend={result.get('trend_15m')} 15m_mss={result.get('mss_direction_15m')} | "
+                f"1h_trend={result.get('trend_1h')} 1h_mss={result.get('mss_direction_1h')} | "
+                f"trade_dir={result.get('direction')} score={result.get('score')} "
+                f"reject={result.get('reject_reason','-')}")
     result_summary = _summarize_analysis(result)
 
     # Log signal regardless of outcome

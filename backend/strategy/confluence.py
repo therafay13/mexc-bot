@@ -39,8 +39,8 @@ def score_setup(symbol: str, candles_15m: List[Candle], candles_1h: List[Candle]
 
     htf_bull  = struct_1h["trend"] == "UPTREND"   or struct_1h.get("mss_direction") == "BULLISH"
     htf_bear  = struct_1h["trend"] == "DOWNTREND" or struct_1h.get("mss_direction") == "BEARISH"
-    if trade_dir == "LONG"  and not htf_bull: return _reject("HTF bias is bearish")
-    if trade_dir == "SHORT" and not htf_bear: return _reject("HTF bias is bullish")
+    if trade_dir == "LONG"  and not htf_bull: return _reject("HTF bias is bearish", trade_dir)
+    if trade_dir == "SHORT" and not htf_bear: return _reject("HTF bias is bullish", trade_dir)
 
     score     = 35  # MSS(20) + HTF(15) already confirmed
     breakdown = {"mss": 20, "htf_align": 15}
@@ -113,9 +113,16 @@ def score_setup(symbol: str, candles_15m: List[Candle], candles_1h: List[Candle]
         "entry_zone": entry_zone, "sl_price": sl, "current_price": current,
         "atr": vol["atr"], "atr_pct": vol["atr_pct"],
         "active_ob": active_ob, "fvgs": fvgs,
+        "trend_15m": struct_15m["trend"],
+        "trend_1h": struct_1h["trend"],
+        "mss_direction_15m": struct_15m["mss_direction"],
+        "mss_direction_1h": struct_1h["mss_direction"],
     }
 
 
-def _reject(reason: str) -> dict:
+def _reject(reason: str, direction=None) -> dict:
     return {"approved": False, "reject_reason": reason, "score": 0,
-            "score_breakdown": {}, "entry_zone": None, "sl_price": None}
+            "score_breakdown": {}, "entry_zone": None, "sl_price": None,
+            "direction": direction,
+            "trend_15m": None, "trend_1h": None,
+            "mss_direction_15m": None, "mss_direction_1h": None}
