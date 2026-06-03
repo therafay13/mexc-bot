@@ -1,8 +1,11 @@
+import logging
 from sqlalchemy import create_engine, Column, Integer, Float, String, Boolean, Text, func, desc
 from sqlalchemy.orm import declarative_base, Session
 from collections import defaultdict
 from datetime import datetime, timedelta
 import json, time
+
+logger = logging.getLogger(__name__)
 
 Base   = declarative_base()
 engine = create_engine("sqlite:///smc_bot.db",
@@ -112,8 +115,10 @@ class TradeLog:
 
     def get_win_rate(self, last_n=50) -> float:
         with Session(engine) as s:
-            trades = s.query(Trade).filter(Trade.exit_time.isnot(None)) \
-                      .order_by(desc(Trade.exit_time)).limit(last_n).all()
+            trades = s.query(Trade).filter(
+                Trade.exit_time.isnot(None),
+                Trade.exit_reason.notin_(["STALE_CLOSE", "RESTART"])
+            ).order_by(desc(Trade.exit_time)).limit(last_n).all()
             return sum(1 for t in trades if t.was_winner) / len(trades) if trades else 0.0
 
     def get_total_pnl(self) -> float:
@@ -138,12 +143,29 @@ class TradeLog:
         with Session(engine) as s:
             return s.query(Signal).order_by(desc(Signal.timestamp)).limit(limit).all()
 
+    def cleanup_orphaned_trades(self):
+        """Close any trades still marked as open (stale from previous sessions)."""
+        with Session(engine) as s:
+            orphans = s.query(Trade).filter(Trade.exit_time.is_(None)).all()
+            now = int(time.time())
+            for t in orphans:
+                t.exit_price = 0
+                t.pnl_usdt = 0.0
+                t.exit_reason = "RESTART"
+                t.was_winner = False
+                t.exit_time = now
+                t.rr_achieved = 0.0
+            s.commit()
+            if orphans:
+                logger.info(f"Cleaned up {len(orphans)} orphaned trades from previous session")
+
     def get_kronos_accuracy(self) -> float:
         """What % of Kronos-approved trades were winners."""
         with Session(engine) as s:
             trades = s.query(Trade).filter(
                 Trade.kronos_confidence > 0,
-                Trade.exit_time.isnot(None)
+                Trade.exit_time.isnot(None),
+                Trade.exit_reason.notin_(["STALE_CLOSE", "RESTART"])
             ).all()
             return sum(1 for t in trades if t.was_winner) / len(trades) if trades else 0.0
 

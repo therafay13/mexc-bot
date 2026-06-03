@@ -21,6 +21,7 @@ const App = () => {
   const [status, setStatus] = useState({ running: true, kronos_loaded: false, mode: 'PAPER' });
   const [account, setAccount] = useState({ balance: 300, day_open: 300, daily_pnl: 0, total_pnl: 0, win_rate: 0, kronos_acc: 0, equity_curve: [] });
   const [positions, setPositions] = useState([]);
+  const [pendingOrders, setPendingOrders] = useState([]);
   const [signals, setSignals] = useState([]);
   const [trades, setTrades] = useState([]);
   const [scanner, setScanner] = useState([]);
@@ -73,6 +74,8 @@ const App = () => {
         setStatus({ ...status, ...s });
         const p = await fetch('/api/positions').then(r => r.json());
         setPositions(p);
+        const pend = await fetch('/api/pending').then(r => r.json());
+        setPendingOrders(pend);
         const sig = await fetch('/api/signals').then(r => r.json());
         setSignals(sig);
         const t = await fetch('/api/trades').then(r => r.json());
@@ -94,10 +97,15 @@ const App = () => {
     } else if (event === 'price') {
       setPositions(prev => prev.map(p => p.symbol === data.symbol ? { ...p, current_price: data.price } : p));
     } else if (event === 'signal') {
-      setSignals(prev => [ { ...data, timestamp: msg.ts }, ...prev ].slice(0, 50));
+      setSignals(prev => [ { ...data, timestamp: msg.ts }, ...prev ].slice(0, 30));
       setEvents(prev => [ { ts: new Date(msg.ts * 1000).toLocaleTimeString(), type: 'signal', msg: `Signal: ${data.symbol} ${data.direction} (Score: ${data.score})`, color: C.accent }, ...prev ].slice(0, 100));
+    } else if (event === 'pending_order') {
+      const pend = { ...data, entry_price: data.entry, sl_price: data.sl };
+      setPendingOrders(prev => [...prev, pend]);
+      setEvents(prev => [ { ts: new Date(msg.ts * 1000).toLocaleTimeString(), type: 'pending', msg: `Pending Order: ${data.symbol} ${data.direction} @ ${data.entry} ${data.leverage}x`, color: C.yellow }, ...prev ].slice(0, 100));
     } else if (event === 'trade_opened') {
       setEvents(prev => [ { ts: new Date(msg.ts * 1000).toLocaleTimeString(), type: 'trade', msg: `Trade Opened: ${data.symbol} ${data.direction}`, color: C.green }, ...prev ].slice(0, 100));
+      setPendingOrders(prev => prev.filter(p => p.symbol !== data.symbol));
       fetch('/api/positions').then(r => r.json()).then(setPositions);
     } else if (event === 'scanner_update') {
       setScanner(data.coins);
@@ -121,6 +129,48 @@ const App = () => {
     } catch (e) {
       alert('Failed to save settings.');
     }
+  };
+
+  const cancelOrder = async (symbol) => {
+    try {
+      const res = await fetch(`/api/orders/${symbol}/cancel`, { method: 'POST' });
+      const data = await res.json();
+      if (data.status === 'cancelled') {
+        setPendingOrders(prev => prev.filter(p => p.symbol !== symbol));
+        setEvents(prev => [{ ts: new Date().toLocaleTimeString(), type: 'cancel', msg: `Cancelled: ${symbol}`, color: C.red }, ...prev].slice(0, 100));
+      }
+    } catch (e) {}
+  };
+
+  const chaseOrder = async (symbol) => {
+    try {
+      const res = await fetch(`/api/orders/${symbol}/chase`, { method: 'POST' });
+      const data = await res.json();
+      if (data.status === 'executed') {
+        setPendingOrders(prev => prev.filter(p => p.symbol !== symbol));
+        setEvents(prev => [{ ts: new Date().toLocaleTimeString(), type: 'chase', msg: `Chased: ${symbol} @ ${data.entry_price}`, color: C.green }, ...prev].slice(0, 100));
+        setTimeout(async () => {
+          const p = await fetch('/api/positions').then(r => r.json());
+          setPositions(p);
+        }, 500);
+      }
+    } catch (e) {}
+  };
+
+  const closePosition = async (symbol) => {
+    if (!window.confirm(`Close ${symbol} at market price?`)) return;
+    try {
+      const res = await fetch(`/api/positions/${symbol}/close`, { method: 'POST' });
+      const data = await res.json();
+      if (data.status === 'closed') {
+        setPositions(prev => prev.filter(p => p.symbol !== symbol));
+        setEvents(prev => [{ ts: new Date().toLocaleTimeString(), type: 'close', msg: `Closed: ${symbol}`, color: C.red }, ...prev].slice(0, 100));
+        setTimeout(async () => {
+          const t = await fetch('/api/trades').then(r => r.json());
+          setTrades(t);
+        }, 500);
+      }
+    } catch (e) {}
   };
 
   const SidebarItem = ({ label }) => (
@@ -222,7 +272,7 @@ const App = () => {
                   { label: 'Total PnL', val: `$${account.total_pnl.toFixed(2)}`, color: account.total_pnl >= 0 ? C.green : C.red },
                   { label: 'Day PnL', val: `$${account.daily_pnl.toFixed(2)}`, color: account.daily_pnl >= 0 ? C.green : C.red },
                   { label: 'Win Rate', val: `${account.win_rate}%`, color: C.accent },
-                  { label: 'Positions', val: `${positions.length}/3`, color: C.text },
+                  { label: 'Active', val: `${positions.length + pendingOrders.length}/3`, color: C.text },
                 ].map((card, i) => (
                   <div key={i} style={{ backgroundColor: C.card, padding: '20px', borderRadius: '8px', border: `1px solid ${C.border}` }}>
                     <div style={{ color: C.muted, fontSize: '12px', marginBottom: '8px' }}>{card.label}</div>
@@ -280,72 +330,95 @@ const App = () => {
           )}
 
           {tab === 'Positions' && (
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(350px, 1fr))', gap: '20px' }}>
-              {positions.map((p, i) => (
-                <div key={i} style={{ backgroundColor: C.card, padding: '20px', borderRadius: '8px', border: `1px solid ${C.border}`, position: 'relative' }}>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px' }}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-                      <span style={{ fontSize: '18px', fontWeight: 700 }}>{p.symbol}</span>
-                      <span style={{ 
-                        padding: '2px 6px', 
-                        borderRadius: '4px', 
-                        fontSize: '10px', 
-                        fontWeight: 700, 
-                        backgroundColor: p.direction === 'LONG' ? C.greenDim : C.redDim, 
-                        color: p.direction === 'LONG' ? C.green : C.red 
-                      }}>{p.direction}</span>
-                      <span style={{ padding: '2px 6px', borderRadius: '4px', fontSize: '10px', backgroundColor: C.dim, color: C.text }}>{p.leverage}x</span>
-                      {p.tp1_hit && <span style={{ padding: '2px 6px', borderRadius: '4px', fontSize: '10px', backgroundColor: C.accentDim, color: C.accent, fontWeight: 700 }}>BE ✓</span>}
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '24px' }}>
+              {pendingOrders.length > 0 && (
+                <>
+                  <div style={{ color: C.yellow, fontWeight: 600, fontSize: '14px', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="9"/><path d="M12 8v4l3 3"/></svg>
+                    PENDING ORDERS ({pendingOrders.length})
+                  </div>
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(300px, 1fr))', gap: '16px' }}>
+                    {pendingOrders.map((p, i) => (
+                      <div key={i} style={{ backgroundColor: C.card, padding: '20px', borderRadius: '8px', border: `1px dashed ${C.yellow}44`, position: 'relative' }}>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                            <span style={{ fontSize: '18px', fontWeight: 700 }}>{p.symbol}</span>
+                            <span style={{ padding: '2px 6px', borderRadius: '4px', fontSize: '10px', fontWeight: 700, backgroundColor: p.direction === 'LONG' ? C.greenDim : C.redDim, color: p.direction === 'LONG' ? C.green : C.red }}>{p.direction}</span>
+                            <span style={{ padding: '2px 6px', borderRadius: '4px', fontSize: '10px', backgroundColor: C.dim, color: C.text }}>{p.leverage}x</span>
+                          </div>
+                          <span style={{ fontSize: '11px', color: C.yellow, fontWeight: 700, opacity: 0.7 }}>⏳ PENDING</span>
+                        </div>
+                        <div style={{ textAlign: 'center', fontSize: '18px', fontWeight: 700, color: C.yellow, opacity: 0.7, margin: '12px 0' }}>Limit @ {p.entry_price}</div>
+                        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '10px', fontSize: '11px', textAlign: 'center', marginBottom: '12px' }}>
+                          <div><div style={{ color: C.muted, marginBottom: '4px' }}>SL</div><div className="mono">{p.sl_price}</div></div>
+                          <div><div style={{ color: C.muted, marginBottom: '4px' }}>TP1</div><div className="mono">{p.tp1}</div></div>
+                          <div><div style={{ color: C.muted, marginBottom: '4px' }}>Score</div><div className="mono">{p.score}</div></div>
+                        </div>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '11px', color: C.muted }}>
+                          <span>{p.direction === 'LONG' ? 'Waiting for drop to entry' : 'Waiting for rise to entry'}</span>
+                          <span className="mono">{p.remaining_sec > 0 ? `${Math.floor(p.remaining_sec / 60)}m ${p.remaining_sec % 60}s` : 'Expiring'}</span>
+                        </div>
+                        <div style={{ display: 'flex', gap: '8px', marginTop: '10px' }}>
+                          <button onClick={() => cancelOrder(p.symbol)} style={{ flex: 1, padding: '6px 0', fontSize: '11px', fontWeight: 600, backgroundColor: `${C.red}22`, color: C.red, border: `1px solid ${C.red}44`, borderRadius: '4px', cursor: 'pointer' }}>Cancel</button>
+                          <button onClick={() => chaseOrder(p.symbol)} style={{ flex: 1, padding: '6px 0', fontSize: '11px', fontWeight: 600, backgroundColor: `${C.green}22`, color: C.green, border: `1px solid ${C.green}44`, borderRadius: '4px', cursor: 'pointer' }}>Chase</button>
+                        </div>
+                        {p.flow && <div style={{ fontSize: '10px', color: C.muted, textAlign: 'center', marginTop: '8px' }}>Flow: {p.flow} {p.entry_reason ? `| ${p.entry_reason}` : ''}</div>}
+                      </div>
+                    ))}
+                  </div>
+                </>
+              )}
+              <div style={{ color: C.text, fontWeight: 600, fontSize: '14px', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M13 10V3L4 14h7v7l9-11h-7z"/></svg>
+                OPEN POSITIONS ({positions.length})
+              </div>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(350px, 1fr))', gap: '20px' }}>
+                {positions.map((p, i) => (
+                  <div key={i} style={{ backgroundColor: C.card, padding: '20px', borderRadius: '8px', border: `1px solid ${C.border}`, position: 'relative' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px' }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                        <span style={{ fontSize: '18px', fontWeight: 700 }}>{p.symbol}</span>
+                        <span style={{ padding: '2px 6px', borderRadius: '4px', fontSize: '10px', fontWeight: 700, backgroundColor: p.direction === 'LONG' ? C.greenDim : C.redDim, color: p.direction === 'LONG' ? C.green : C.red }}>{p.direction}</span>
+                        <span style={{ padding: '2px 6px', borderRadius: '4px', fontSize: '10px', backgroundColor: C.dim, color: C.text }}>{p.leverage}x</span>
+                        {p.tp1_hit && <span style={{ padding: '2px 6px', borderRadius: '4px', fontSize: '10px', backgroundColor: C.accentDim, color: C.accent, fontWeight: 700 }}>BE ✓</span>}
+                      </div>
+                      <button onClick={() => closePosition(p.symbol)} style={{ padding: '4px 10px', fontSize: '10px', fontWeight: 600, backgroundColor: `${C.red}22`, color: C.red, border: `1px solid ${C.red}44`, borderRadius: '4px', cursor: 'pointer' }}>Close</button>
                     </div>
-                  </div>
-                  <div className="mono" style={{ fontSize: '32px', fontWeight: 700, textAlign: 'center', margin: '20px 0', color: p.unrealized_pnl >= 0 ? C.green : C.red }}>
-                    {p.unrealized_pnl >= 0 ? '+' : ''}{p.unrealized_pnl.toFixed(2)}
-                  </div>
-                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '10px', fontSize: '11px', textAlign: 'center', marginBottom: '20px' }}>
-                    <div><div style={{ color: C.muted, marginBottom: '4px' }}>Entry</div><div className="mono">{p.entry_price}</div></div>
-                    <div><div style={{ color: C.muted, marginBottom: '4px' }}>Current</div><div className="mono">{p.current_price}</div></div>
-                    <div><div style={{ color: C.muted, marginBottom: '4px' }}>SL</div><div className="mono">{p.sl_price}</div></div>
-                    <div><div style={{ color: C.muted, marginBottom: '4px' }}>TP1</div><div className="mono">{p.tp1}</div></div>
-                  </div>
-                  <div style={{ height: '6px', backgroundColor: C.dim, borderRadius: '3px', overflow: 'hidden', marginBottom: '20px', position: 'relative' }}>
-                    <div style={{ 
-                      position: 'absolute', 
-                      left: '50%', 
-                      width: '2px', 
-                      height: '100%', 
-                      backgroundColor: C.text, 
-                      zIndex: 2 
-                    }}></div>
-                    <div style={{ 
-                      position: 'absolute', 
-                      left: '0', 
-                      width: '100%', 
-                      height: '100%', 
-                      background: `linear-gradient(to right, ${C.red}, ${C.yellow}, ${C.green})`, 
-                      opacity: 0.6 
-                    }}></div>
-                  </div>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '12px' }}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                      <span style={{ color: C.muted }}>Score:</span>
-                      <div style={{ width: '60px', height: '4px', backgroundColor: C.dim, borderRadius: '2px' }}>
-                        <div style={{ width: `${p.score}%`, height: '100%', backgroundColor: C.accent, borderRadius: '2px' }}></div>
+                    <div className="mono" style={{ fontSize: '32px', fontWeight: 700, textAlign: 'center', margin: '20px 0', color: p.unrealized_pnl >= 0 ? C.green : C.red }}>
+                      {p.unrealized_pnl >= 0 ? '+' : ''}{p.unrealized_pnl.toFixed(2)}
+                    </div>
+                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '10px', fontSize: '11px', textAlign: 'center', marginBottom: '20px' }}>
+                      <div><div style={{ color: C.muted, marginBottom: '4px' }}>Entry</div><div className="mono">{p.entry_price}</div></div>
+                      <div><div style={{ color: C.muted, marginBottom: '4px' }}>Current</div><div className="mono">{p.current_price}</div></div>
+                      <div><div style={{ color: C.muted, marginBottom: '4px' }}>SL</div><div className="mono">{p.sl_price}</div></div>
+                      <div><div style={{ color: C.muted, marginBottom: '4px' }}>TP1</div><div className="mono">{p.tp1}</div></div>
+                    </div>
+                    <div style={{ height: '6px', backgroundColor: C.dim, borderRadius: '3px', overflow: 'hidden', marginBottom: '20px', position: 'relative' }}>
+                      <div style={{ position: 'absolute', left: '50%', width: '2px', height: '100%', backgroundColor: C.text, zIndex: 2 }}></div>
+                      <div style={{ position: 'absolute', left: '0', width: '100%', height: '100%', background: `linear-gradient(to right, ${C.red}, ${C.yellow}, ${C.green})`, opacity: 0.6 }}></div>
+                    </div>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '12px' }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                        <span style={{ color: C.muted }}>Score:</span>
+                        <div style={{ width: '60px', height: '4px', backgroundColor: C.dim, borderRadius: '2px' }}>
+                          <div style={{ width: `${p.score}%`, height: '100%', backgroundColor: C.accent, borderRadius: '2px' }}></div>
+                        </div>
+                      </div>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                        <span style={{ color: C.muted }}>Kronos:</span>
+                        <div style={{ width: '60px', height: '4px', backgroundColor: C.dim, borderRadius: '2px' }}>
+                          <div style={{ width: `${p.kronos_confidence * 100}%`, height: '100%', backgroundColor: C.purple, borderRadius: '2px' }}></div>
+                        </div>
                       </div>
                     </div>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                      <span style={{ color: C.muted }}>Kronos:</span>
-                      <div style={{ width: '60px', height: '4px', backgroundColor: C.dim, borderRadius: '2px' }}>
-                        <div style={{ width: `${p.kronos_confidence * 100}%`, height: '100%', backgroundColor: C.purple, borderRadius: '2px' }}></div>
-                      </div>
-                    </div>
                   </div>
-                </div>
-              ))}
-              {[...Array(Math.max(0, 3 - positions.length))].map((_, i) => (
-                <div key={i} style={{ backgroundColor: C.surface, padding: '40px', borderRadius: '8px', border: `1px dashed ${C.border}`, textAlign: 'center', color: C.muted, fontSize: '14px' }}>
-                  Empty Slot
-                </div>
-              ))}
+                ))}
+                {[...Array(Math.max(0, 3 - positions.length))].map((_, i) => (
+                  <div key={i} style={{ backgroundColor: C.surface, padding: '40px', borderRadius: '8px', border: `1px dashed ${C.border}`, textAlign: 'center', color: C.muted, fontSize: '14px' }}>
+                    Empty Slot
+                  </div>
+                ))}
+              </div>
             </div>
           )}
 
@@ -358,6 +431,7 @@ const App = () => {
                     <th style={{ padding: '12px 20px' }}>Dir</th>
                     <th style={{ padding: '12px 20px' }}>Score</th>
                     <th style={{ padding: '12px 20px' }}>Kronos</th>
+                    <th style={{ padding: '12px 20px' }}>Flow</th>
                     <th style={{ padding: '12px 20px' }}>Status</th>
                   </tr>
                 </thead>
@@ -382,6 +456,17 @@ const App = () => {
                           </div>
                           {s.kronos_vetoed && <span style={{ color: C.red, fontSize: '9px', fontWeight: 700 }}>VETOED</span>}
                         </div>
+                      </td>
+                      <td style={{ padding: '12px 20px' }}>
+                        {s.flow ? 
+                          <span style={{ 
+                            display: 'inline-block', padding: '2px 8px', borderRadius: '4px', 
+                            fontSize: '10px', fontWeight: 700,
+                            backgroundColor: s.flow === 'CONFIRMS' ? C.greenDim : s.flow === 'NEUTRAL' ? '#ffd60022' : C.redDim,
+                            color: s.flow === 'CONFIRMS' ? C.green : s.flow === 'NEUTRAL' ? C.yellow : C.red
+                          }}>{s.flow}</span> : 
+                          <span style={{ color: C.muted, fontSize: '11px' }}>—</span>
+                        }
                       </td>
                       <td style={{ padding: '12px 20px' }}>
                         {s.approved ? 

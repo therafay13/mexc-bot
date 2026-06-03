@@ -22,6 +22,7 @@ scp -i $SSH_KEY -r `
     "$BOT_DIR\backend" `
     "$BOT_DIR\deploy" `
     "$BOT_DIR\static" `
+    "$BOT_DIR\kronos" `
     "$BOT_DIR\.env" `
     "$BOT_DIR\requirements.txt" `
     "$BOT_DIR\run.py" `

@@ -35,11 +35,21 @@
             text: "#e2e8f0", muted: "#4a5568", dim: "#1e2a3a",
         };
 
+        const formatPrice = (price) => {
+            if (!price) return '—';
+            const p = Math.abs(price);
+            if (p >= 10000) return price.toFixed(2);
+            if (p >= 1) return price.toFixed(4);
+            if (p >= 0.001) return price.toFixed(6);
+            return price.toFixed(8);
+        };
+
         const App = () => {
             const [tab, setTab] = useState('Overview');
             const [status, setStatus] = useState({ running: true, kronos_loaded: false, mode: 'PAPER' });
-            const [account, setAccount] = useState({ balance: 0, day_open: 0, daily_pnl: 0, total_pnl: 0, win_rate: 0, kronos_acc: 0, equity_curve: [] });
+            const [account, setAccount] = useState({ balance: 0, day_open: 0, daily_pnl: 0, total_pnl: 0, total_fees: 0, win_rate: 0, kronos_acc: 0, equity_curve: [] });
             const [positions, setPositions] = useState([]);
+            const [pendingOrders, setPendingOrders] = useState([]);
             const [signals, setSignals] = useState([]);
             const [trades, setTrades] = useState([]);
             const [scanner, setScanner] = useState([]);
@@ -69,9 +79,10 @@
             useEffect(() => {
                 const fetchInit = async () => {
                     try {
-                        const [s, p, sig, t, set, sc] = await Promise.all([
+                        const [s, p, pend, sig, t, set, sc] = await Promise.all([
                             fetch('/api/status').then(r => r.json()),
                             fetch('/api/positions').then(r => r.json()),
+                            fetch('/api/pending').then(r => r.json()),
                             fetch('/api/signals').then(r => r.json()),
                             fetch('/api/trades').then(r => r.json()),
                             fetch('/api/settings').then(r => r.json()),
@@ -79,6 +90,7 @@
                         ]);
                         setStatus(s || { running: true });
                         setPositions(p || []);
+                        setPendingOrders(pend || []);
                         setSignals(sig || []);
                         setTrades(t || []);
                         setSettings(set || {});
@@ -108,13 +120,30 @@
                         } else if (event === 'price') {
                             setPositions(prev => prev.map(p => p.symbol === data.symbol ? { ...p, current_price: data.price } : p));
                         } else if (event === 'signal') {
-                            setSignals(prev => [ { ...data, timestamp: msg.ts }, ...prev ].slice(0, 50));
+                            setSignals(prev => [ { ...data, timestamp: msg.ts }, ...prev ].slice(0, 30));
                             setEvents(prev => [ { ts: new Date(msg.ts * 1000).toLocaleTimeString(), type: 'signal', msg: `Signal: ${data.symbol} ${data.direction} (Score: ${data.score})`, color: C.accent }, ...prev ].slice(0, 100));
+                        } else if (event === 'pending_order') {
+                            const pend = { ...data, entry_price: data.entry, sl_price: data.sl };
+                            setPendingOrders(prev => [...prev, pend]);
+                            setEvents(prev => [ { ts: new Date(msg.ts * 1000).toLocaleTimeString(), type: 'pending', msg: `Pending Order: ${data.symbol} ${data.direction} @ ${formatPrice(data.entry)} ${data.leverage}x`, color: C.yellow }, ...prev ].slice(0, 100));
                         } else if (event === 'trade_opened') {
                             setEvents(prev => [ { ts: new Date(msg.ts * 1000).toLocaleTimeString(), type: 'trade', msg: `Trade Opened: ${data.symbol} ${data.direction}`, color: C.green }, ...prev ].slice(0, 100));
+                            setPendingOrders(prev => prev.filter(p => p.symbol !== data.symbol));
                             fetch('/api/positions').then(r => r.json()).then(setPositions);
                         } else if (event === 'scanner_update') {
                             setScanner(data.coins || []);
+                        } else if (event === 'position_closed') {
+                            setPositions(prev => prev.filter(p => p.symbol !== data.symbol));
+                            setPendingOrders(prev => prev.filter(p => p.symbol !== data.symbol));
+                            setEvents(prev => [ { ts: new Date().toLocaleTimeString(), type: 'close', msg: `Closed ${data.symbol}: ${data.reason} PnL=$${data.pnl}`, color: data.pnl >= 0 ? C.green : C.red }, ...prev ].slice(0, 100));
+                            fetch('/api/trades').then(r => r.json()).then(setTrades);
+                        } else if (event === 'sl_moved') {
+                            setPositions(prev => prev.map(p => p.symbol === data.symbol ? { ...p, sl_price: data.sl_price, tp1_hit: true, margin_usdt: data.margin_usdt } : p));
+                            setEvents(prev => [ { ts: new Date().toLocaleTimeString(), type: 'tp', msg: `${data.symbol}: TP1 hit, SL→BE, PnL+$${data.tp1_pnl}`, color: C.green }, ...prev ].slice(0, 100));
+                        } else if (event === 'tp_hit') {
+                            const field = data.level === 'TP2' ? 'tp2_hit' : 'tp3_hit';
+                            setPositions(prev => prev.map(p => p.symbol === data.symbol ? { ...p, [field]: true, margin_usdt: data.margin_usdt } : p));
+                            setEvents(prev => [ { ts: new Date().toLocaleTimeString(), type: 'tp', msg: `${data.symbol}: ${data.level} hit, PnL+$${data.pnl}`, color: C.green }, ...prev ].slice(0, 100));
                         }
                     } catch (err) { console.error("WS Error:", err); }
                 };
@@ -140,6 +169,48 @@
                 } catch (e) {
                     alert('Failed to save settings.');
                 }
+            };
+
+            const cancelOrder = async (symbol) => {
+                try {
+                    const res = await fetch(`/api/orders/${symbol}/cancel`, { method: 'POST' });
+                    const data = await res.json();
+                    if (data.status === 'cancelled') {
+                        setPendingOrders(prev => prev.filter(p => p.symbol !== symbol));
+                        setEvents(prev => [{ ts: new Date().toLocaleTimeString(), type: 'cancel', msg: `Cancelled: ${symbol}`, color: C.red }, ...prev].slice(0, 100));
+                    }
+                } catch (e) {}
+            };
+
+            const chaseOrder = async (symbol) => {
+                try {
+                    const res = await fetch(`/api/orders/${symbol}/chase`, { method: 'POST' });
+                    const data = await res.json();
+                    if (data.status === 'executed') {
+                        setPendingOrders(prev => prev.filter(p => p.symbol !== symbol));
+                        setEvents(prev => [{ ts: new Date().toLocaleTimeString(), type: 'chase', msg: `Chased: ${symbol} @ ${data.entry_price}`, color: C.green }, ...prev].slice(0, 100));
+                        setTimeout(async () => {
+                            const p = await fetch('/api/positions').then(r => r.json());
+                            setPositions(p);
+                        }, 500);
+                    }
+                } catch (e) {}
+            };
+
+            const closePosition = async (symbol) => {
+                if (!window.confirm(`Close ${symbol} at market price?`)) return;
+                try {
+                    const res = await fetch(`/api/positions/${symbol}/close`, { method: 'POST' });
+                    const data = await res.json();
+                    if (data.status === 'closed') {
+                        setPositions(prev => prev.filter(p => p.symbol !== symbol));
+                        setEvents(prev => [{ ts: new Date().toLocaleTimeString(), type: 'close', msg: `Closed: ${symbol}`, color: C.red }, ...prev].slice(0, 100));
+                        setTimeout(async () => {
+                            const t = await fetch('/api/trades').then(r => r.json());
+                            setTrades(t);
+                        }, 500);
+                    }
+                } catch (e) {}
             };
 
             const SidebarItem = ({ label }) => (
@@ -207,12 +278,13 @@
                         <div className="flex-1 p-6 overflow-y-auto">
                             {tab === 'Overview' && (
                                 <div className="flex flex-col gap-6">
-                                    <div className="grid grid-cols-4 gap-5">
+                                    <div className="grid grid-cols-5 gap-5">
                                         {[
                                             { label: 'Total PnL', val: `$${account.total_pnl?.toFixed(2) || '0.00'}`, color: account.total_pnl >= 0 ? 'text-green-400' : 'text-red-400' },
                                             { label: 'Day PnL', val: `$${account.daily_pnl?.toFixed(2) || '0.00'}`, color: account.daily_pnl >= 0 ? 'text-green-400' : 'text-red-400' },
                                             { label: 'Win Rate', val: `${account.win_rate || 0}%`, color: 'text-cyan-400' },
-                                            { label: 'Positions', val: `${positions.length}/3`, color: 'text-slate-100' },
+                                            { label: 'Active', val: `${positions.length + pendingOrders.length}/3`, color: 'text-slate-100' },
+                                            { label: 'Fees Paid', val: `$${account.total_fees?.toFixed(2) || '0.00'}`, color: 'text-slate-400' },
                                         ].map((card, i) => (
                                             <div key={i} className="bg-[#0f1420] p-5 rounded-lg border border-[#1a2236]">
                                                 <div className="text-slate-500 text-xs mb-2">{card.label}</div>
@@ -272,51 +344,109 @@
                             )}
 
                             {tab === 'Positions' && (
-                                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
-                                    {positions.map((p, i) => (
-                                        <div key={i} className="bg-[#0f1420] p-5 rounded-lg border border-[#1a2236] relative">
-                                            <div className="flex justify-between items-center mb-5">
-                                                <div className="flex items-center gap-3">
-                                                    <span className="text-lg font-bold">{p.symbol}</span>
-                                                    <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${p.direction === 'LONG' ? 'bg-green-400/10 text-green-400' : 'bg-red-400/10 text-red-400'}`}>{p.direction}</span>
-                                                    <span className="px-2 py-0.5 rounded text-[10px] bg-slate-800 text-slate-300">{p.leverage}x</span>
-                                                    {p.tp1_hit && <span className="px-2 py-0.5 rounded text-[10px] bg-cyan-400/10 text-cyan-400 font-bold">BE ✓</span>}
+                                <div className="flex flex-col gap-6">
+                                    {pendingOrders.length > 0 && (
+                                        <>
+                                            <div className="text-sm font-semibold text-yellow-400 flex items-center gap-2">
+                                                <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
+                                                PENDING ORDERS ({pendingOrders.length})
+                                            </div>
+                                            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
+                                                {pendingOrders.map((p, i) => (
+                                                    <div key={i} className="bg-[#0f1420]/60 p-5 rounded-lg border border-dashed border-yellow-500/30 relative">
+                                                        <div className="flex justify-between items-center mb-5">
+                                                            <div className="flex items-center gap-3">
+                                                                <span className="text-lg font-bold">{p.symbol}</span>
+                                                                <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${p.direction === 'LONG' ? 'bg-green-400/10 text-green-400' : 'bg-red-400/10 text-red-400'}`}>{p.direction}</span>
+                                                                <span className="px-2 py-0.5 rounded text-[10px] bg-slate-800 text-slate-300">{p.leverage}x</span>
+                                                            </div>
+                                                            <span className="text-[10px] text-yellow-400 font-bold animate-pulse">⌛ PENDING</span>
+                                                        </div>
+                                                        <div className="text-center text-lg font-bold text-yellow-400/70 my-3">Limit @ {formatPrice(p.entry_price)}</div>
+                                                        <div className="grid grid-cols-3 gap-x-4 gap-y-2 text-[11px] text-center mb-4">
+                                                            <div><div className="text-slate-500 mb-1">SL</div><div className="mono">{formatPrice(p.sl_price)}</div></div>
+                                                            <div><div className="text-slate-500 mb-1">TP1</div><div className="mono">{formatPrice(p.tp1)}</div></div>
+                                                            <div><div className="text-slate-500 mb-1">Score</div><div className="mono">{p.score}</div></div>
+                                                        </div>
+                                                        <div className="flex justify-between text-[11px] text-slate-500">
+                                                            <span>{p.direction === 'LONG' ? 'Waiting for price to drop' : 'Waiting for price to rise'} to entry</span>
+                                                            <span className="mono">{p.remaining_sec > 0 ? `${Math.floor(p.remaining_sec / 60)}m ${p.remaining_sec % 60}s` : 'Expiring'}</span>
+                                                        </div>
+                                                        <div className="flex gap-2 mt-2.5">
+                                                            <button onClick={() => cancelOrder(p.symbol)} className="flex-1 py-1.5 text-[11px] font-semibold rounded border cursor-pointer" style={{ backgroundColor: '#ff174422', color: '#ff1744', borderColor: '#ff174444' }}>Cancel</button>
+                                                            <button onClick={() => chaseOrder(p.symbol)} className="flex-1 py-1.5 text-[11px] font-semibold rounded border cursor-pointer" style={{ backgroundColor: '#00e67622', color: '#00e676', borderColor: '#00e67644' }}>Chase</button>
+                                                        </div>
+                                                        {p.flow && <div className="mt-2 text-[10px] text-slate-500 text-center">Flow: {p.flow} {p.entry_reason ? `| ${p.entry_reason}` : ''}</div>}
+                                                    </div>
+                                                ))}
+                                            </div>
+                                        </>
+                                    )}
+                                    <div className="text-sm font-semibold text-slate-200 flex items-center gap-2">
+                                        <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" /></svg>
+                                        OPEN POSITIONS ({positions.length})
+                                    </div>
+                                    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
+                                        {positions.map((p, i) => (
+                                            <div key={i} className="bg-[#0f1420] p-5 rounded-lg border border-[#1a2236] relative">
+                                                <div className="flex justify-between items-center mb-5">
+                                                    <div className="flex items-center gap-3">
+                                                        <span className="text-lg font-bold">{p.symbol}</span>
+                                                        <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${p.direction === 'LONG' ? 'bg-green-400/10 text-green-400' : 'bg-red-400/10 text-red-400'}`}>{p.direction}</span>
+                                                        <span className="px-2 py-0.5 rounded text-[10px] bg-slate-800 text-slate-300">{p.leverage}x</span>
+                                                        {p.tp1_hit && <span className="px-2 py-0.5 rounded text-[10px] bg-cyan-400/10 text-cyan-400 font-bold">BE ✓</span>}
+                                                        {p.tp2_hit && <span className="px-2 py-0.5 rounded text-[10px] bg-amber-400/10 text-amber-400 font-bold">TP2 ✓</span>}
+                                                        {p.tp3_hit && <span className="px-2 py-0.5 rounded text-[10px] bg-green-400/10 text-green-400 font-bold">TP3 ✓</span>}
+                                                    </div>
+                                                    <button onClick={() => closePosition(p.symbol)} className="px-2.5 py-1 text-[10px] font-semibold rounded border cursor-pointer" style={{ backgroundColor: '#ff174422', color: '#ff1744', borderColor: '#ff174444' }}>Close</button>
                                                 </div>
-                                            </div>
-                                            <div className={`mono text-3xl font-bold text-center my-5 ${p.unrealized_pnl >= 0 ? 'text-green-400' : 'text-red-400'}`}>
-                                                {p.unrealized_pnl >= 0 ? '+' : ''}{p.unrealized_pnl?.toFixed(2) || '0.00'}
-                                            </div>
-                                            <div className="grid grid-cols-4 gap-2 text-[11px] text-center mb-5">
-                                                <div><div className="text-slate-500 mb-1">Entry</div><div className="mono">{p.entry_price}</div></div>
-                                                <div><div className="text-slate-500 mb-1">Current</div><div className="mono">{p.current_price}</div></div>
-                                                <div><div className="text-slate-500 mb-1">SL</div><div className="mono">{p.sl_price}</div></div>
-                                                <div><div className="text-slate-500 mb-1">TP1</div><div className="mono">{p.tp1}</div></div>
-                                            </div>
-                                            <div className="h-1.5 bg-slate-800 rounded-full overflow-hidden mb-5 relative">
-                                                <div className="absolute left-1/2 w-0.5 h-full bg-slate-100 z-10"></div>
-                                                <div className="absolute inset-0 bg-gradient-to-r from-red-500 via-yellow-400 to-green-500 opacity-60"></div>
-                                            </div>
-                                            <div className="flex justify-between text-xs">
-                                                <div className="flex items-center gap-2">
-                                                    <span className="text-slate-500">Score:</span>
-                                                    <div className="w-12 h-1 bg-slate-800 rounded-full overflow-hidden">
-                                                        <div className="h-full bg-cyan-400" style={{ width: `${p.score}%` }}></div>
+                                                <div className={`mono text-3xl font-bold text-center my-5 ${(() => { const pnl = p.direction === 'LONG' ? (p.current_price - p.entry_price) / p.entry_price * (p.margin_usdt || 0) * p.leverage : (p.entry_price - p.current_price) / p.entry_price * (p.margin_usdt || 0) * p.leverage; return pnl >= 0 ? 'text-green-400' : 'text-red-400' })()}`}>
+                                                    {(() => { const pnl = p.direction === 'LONG' ? (p.current_price - p.entry_price) / p.entry_price * (p.margin_usdt || 0) * p.leverage : (p.entry_price - p.current_price) / p.entry_price * (p.margin_usdt || 0) * p.leverage; return (pnl >= 0 ? '+' : '') + pnl.toFixed(2) })()}
+                                                </div>
+                                                <div className="text-center text-[11px] text-slate-500 mb-3">Margin: ${p.margin_usdt?.toFixed(2) || '0.00'}</div>
+                                                <div className="grid grid-cols-3 gap-x-4 gap-y-2 text-[11px] text-center mb-5">
+                                                    <div><div className="text-slate-500 mb-1">Entry</div><div className="mono">{formatPrice(p.entry_price)}</div></div>
+                                                    <div><div className="text-slate-500 mb-1">Current</div><div className="mono">{formatPrice(p.current_price)}</div></div>
+                                                    <div><div className="text-slate-500 mb-1">SL</div><div className="mono">{p.tp1_hit ? 'BE ✓' : formatPrice(p.sl_price)}</div></div>
+                                                    <div>
+                                                        <div className={`text-slate-500 mb-1 ${p.tp1_hit ? 'line-through opacity-50' : ''}`}>TP1</div>
+                                                        <div className={`mono ${p.tp1_hit ? 'text-cyan-400 line-through opacity-50' : ''}`}>{formatPrice(p.tp1)}</div>
+                                                    </div>
+                                                    <div>
+                                                        <div className={`text-slate-500 mb-1 ${p.tp2_hit ? 'line-through opacity-50' : ''}`}>TP2</div>
+                                                        <div className={`mono ${p.tp2_hit ? 'text-cyan-400 line-through opacity-50' : ''}`}>{formatPrice(p.tp2)}</div>
+                                                    </div>
+                                                    <div>
+                                                        <div className={`text-slate-500 mb-1 ${p.tp3_hit ? 'line-through opacity-50' : ''}`}>TP3</div>
+                                                        <div className={`mono ${p.tp3_hit ? 'text-cyan-400 line-through opacity-50' : ''}`}>{formatPrice(p.tp3)}</div>
                                                     </div>
                                                 </div>
-                                                <div className="flex items-center gap-2">
-                                                    <span className="text-slate-500">Kronos:</span>
-                                                    <div className="w-12 h-1 bg-slate-800 rounded-full overflow-hidden">
-                                                        <div className="h-full bg-purple-500" style={{ width: `${(p.kronos_confidence || 0) * 100}%` }}></div>
+                                                <div className="h-1.5 bg-slate-800 rounded-full overflow-hidden mb-5 relative">
+                                                    <div className="absolute left-1/2 w-0.5 h-full bg-slate-100 z-10"></div>
+                                                    <div className="absolute inset-0 bg-gradient-to-r from-red-500 via-yellow-400 to-green-500 opacity-60"></div>
+                                                </div>
+                                                <div className="flex justify-between text-xs">
+                                                    <div className="flex items-center gap-2">
+                                                        <span className="text-slate-500">Score:</span>
+                                                        <div className="w-12 h-1 bg-slate-800 rounded-full overflow-hidden">
+                                                            <div className="h-full bg-cyan-400" style={{ width: `${p.score}%` }}></div>
+                                                        </div>
+                                                    </div>
+                                                    <div className="flex items-center gap-2">
+                                                        <span className="text-slate-500">Kronos:</span>
+                                                        <div className="w-12 h-1 bg-slate-800 rounded-full overflow-hidden">
+                                                            <div className="h-full bg-purple-500" style={{ width: `${(p.kronos_confidence || 0) * 100}%` }}></div>
+                                                        </div>
                                                     </div>
                                                 </div>
                                             </div>
-                                        </div>
-                                    ))}
-                                    {[...Array(Math.max(0, 3 - positions.length))].map((_, i) => (
-                                        <div key={i} className="bg-[#0b0f1a] p-10 rounded-lg border border-dashed border-[#1a2236] text-center text-slate-600 text-sm">
-                                            Empty Slot
-                                        </div>
-                                    ))}
+                                        ))}
+                                        {[...Array(Math.max(0, 3 - positions.length))].map((_, i) => (
+                                            <div key={i} className="bg-[#0b0f1a] p-10 rounded-lg border border-dashed border-[#1a2236] text-center text-slate-600 text-sm">
+                                                Empty Slot
+                                            </div>
+                                        ))}
+                                    </div>
                                 </div>
                             )}
 
@@ -329,6 +459,7 @@
                                                 <th className="p-3">Dir</th>
                                                 <th className="p-3">Score</th>
                                                 <th className="p-3">Kronos</th>
+                                                <th className="p-3">Flow</th>
                                                 <th className="p-3">Status</th>
                                                 <th className="p-3 w-10"></th>
                                             </tr>
@@ -357,6 +488,17 @@
                                                             </div>
                                                         </td>
                                                         <td className="p-3">
+                                                            {s.flow ? 
+                                                                <span className={`inline-block px-2 py-0.5 rounded text-[10px] font-bold ${
+                                                                    s.flow === 'CONFIRMS' ? 'bg-green-400/10 text-green-400' :
+                                                                    s.flow === 'NEUTRAL' ? 'bg-yellow-400/10 text-yellow-400' :
+                                                                    s.flow === 'OPPOSES' ? 'bg-red-400/10 text-red-400' :
+                                                                    'bg-slate-800 text-slate-400'
+                                                                }`}>{s.flow}</span> : 
+                                                                <span className="text-slate-600 text-[11px]">—</span>
+                                                            }
+                                                        </td>
+                                                        <td className="p-3">
                                                             {s.approved ? 
                                                                 <span className="text-green-400 text-[11px] font-bold">✓ APPROVED</span> : 
                                                                 <span className="text-red-400 text-[11px]">✗ {s.reason}</span>
@@ -366,7 +508,7 @@
                                                     </tr>
                                                     {expandedSignal === i && s.detail && (
                                                         <tr className="bg-[#0b0f1a]">
-                                                            <td colSpan="6" className="p-4">
+                                                            <td colSpan="7" className="p-4">
                                                                 <div className="grid grid-cols-2 md:grid-cols-3 gap-4 text-xs">
                                                                     {s.detail.order_block && (
                                                                         <div className="bg-[#0f1420] p-3 rounded border border-[#1a2236]">

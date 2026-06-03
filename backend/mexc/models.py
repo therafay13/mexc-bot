@@ -95,6 +95,10 @@ class OpenPosition(BaseModel):
     unrealized_pnl: float = 0.0
     score: int
     entry_time: int
+    entry_fee: float = 0.0
+    exit_fees_paid: float = 0.0
     tp1_hit: bool = False
+    tp2_hit: bool = False
+    tp3_hit: bool = False
     db_id: int = 0
     kronos_confidence: float = 0.0

@@ -97,6 +97,7 @@ class MarketScanner:
     def __init__(self, client: MexcClient, blocked: Set[str] = None):
         self.client  = client
         self.blocked = blocked or set()
+        self._offset = 0
 
     async def scan(self) -> List[Tuple[str, float, dict]]:
         try:
@@ -108,11 +109,21 @@ class MarketScanner:
         results = []
         for t in (tickers if isinstance(tickers, list) else []):
             symbol = t.get("symbol", "")
+            if not symbol.endswith("_USDT"): continue
             base   = symbol.replace("_USDT","").replace("_","")
-            if base in STABLES or symbol in self.blocked: continue
+            if base in STABLES or symbol.replace("_","") in self.blocked: continue
             sc = _score_ticker(t)
             if sc > 0: results.append((symbol, sc, t))
 
         results.sort(key=lambda x: x[1], reverse=True)
-        logger.info(f"Scanner: {len(results)} valid coins, top {TOP_COINS_TO_ANALYZE} selected")
-        return results[:TOP_COINS_TO_ANALYZE]
+
+        # Rotating window through the full ranked list — covers all coins over time
+        total = len(results)
+        if total == 0:
+            self._offset = 0
+            return []
+        start = self._offset
+        chunk = results[start:start + TOP_COINS_TO_ANALYZE]
+        self._offset = (self._offset + TOP_COINS_TO_ANALYZE) % total
+        logger.info(f"Scanner: {total} valid coins, window [{start}:{start + TOP_COINS_TO_ANALYZE}), offset next → {self._offset}")
+        return chunk

@@ -105,6 +105,7 @@ class MexcWebSocket:
         self._running    = False
         self._connected  = False
 
+
     def on(self, channel: str, handler: Callable):
         """Register an async handler function for a given channel."""
         self.handlers.setdefault(channel, []).append(handler)
@@ -151,11 +152,28 @@ class MexcWebSocket:
     async def _listen(self):
         async for message in self.ws:
             try:
-                data    = json.loads(message)
-                channel = data.get("channel", "")
-                if channel in self.handlers:
-                    for h in self.handlers[channel]:
-                        asyncio.create_task(h(data.get("data", {})))
+                raw = json.loads(message)
+                items = raw if isinstance(raw, list) else [raw]
+                for item in items:
+                    channel = ""
+                    payload = {}
+                    if isinstance(item, dict):
+                        channel = item.get("channel", "")
+                        payload = item.get("data", {})
+                        if channel == "push.deal":
+                            if isinstance(payload, dict):
+                                payload.setdefault("symbol", item.get("symbol", ""))
+                            elif isinstance(payload, list):
+                                payload = {"deals": payload, "symbol": item.get("symbol", "")}
+                    elif isinstance(item, list) and len(item) >= 2:
+                        channel, payload = item[0], item[1]
+                    else:
+                        continue
+                    if channel in self.handlers:
+                        for handler in self.handlers[channel]:
+                            result = handler(payload)
+                            if asyncio.iscoroutine(result):
+                                asyncio.create_task(result)
             except Exception as e:
                 logger.error(f"WS handler error: {e}")
 
@@ -170,6 +188,21 @@ class MexcWebSocket:
                           "param": {"symbol": symbol, "interval": interval}})
         self.subscriptions.add(msg)
         if self._connected: await self.ws.send(msg)
+
+    async def subscribe_deals(self, symbol: str):
+        """Subscribe to trade deal stream for a symbol. symbol format: BTC_USDT"""
+        msg = json.dumps({"method": "sub.deal", "param": {"symbol": symbol}})
+        self.subscriptions.add(msg)
+        if self._connected:
+            await self.ws.send(msg)
+
+    async def unsubscribe_deals(self, symbol: str):
+        """Unsubscribe from deal stream when no longer watching a coin."""
+        msg = json.dumps({"method": "unsub.deal", "param": {"symbol": symbol}})
+        unsub_key = json.dumps({"method": "sub.deal", "param": {"symbol": symbol}})
+        self.subscriptions.discard(unsub_key)
+        if self._connected:
+            await self.ws.send(msg)
 
     async def stop(self):
         self._running = False
